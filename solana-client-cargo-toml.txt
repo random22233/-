@@ -1,0 +1,16 @@
+[package]
+name = "solana-deposit-client"
+version = "0.1.0"
+edition = "2021"
+description = "Client for interacting with Solana deposit program"
+
+[[bin]]
+name = "solana-deposit-client"
+path = "src/main.rs"
+
+[dependencies]
+solana-sdk = "1.17.12"
+solana-client = "1.17.12"
+solana-program = "1.17.12"
+borsh = "0.10.3"
+clap = "2.33.3"

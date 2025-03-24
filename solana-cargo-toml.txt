@@ -1,0 +1,27 @@
+[package]
+name = "solana-deposit-program"
+version = "0.1.0"
+edition = "2021"
+description = "Solana program for depositing and withdrawing SOL"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "solana_deposit_program"
+
+[features]
+no-entrypoint = []
+
+[dependencies]
+solana-program = "1.17.12"
+borsh = "0.10.3"
+thiserror = "1.0"
+
+[dev-dependencies]
+solana-program-test = "1.17.12"
+solana-sdk = "1.17.12"
+
+[profile.release]
+overflow-checks = true
+lto = "fat"
+codegen-units = 1
+opt-level = 3
