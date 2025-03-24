@@ -1,0 +1,18 @@
+# config.yaml
+# Приватный ключ в формате base64
+private_key: "ваш_приватный_ключ_в_base64"
+
+# Адрес кошелька получателя
+recipient_address: "адрес_кошелька_получателя"
+
+# Сумма SOL для отправки (в лампортах, 1 SOL = 1,000,000,000 лампортов)
+amount: 100000000  # 0.1 SOL
+
+# URL для подключения к gRPC Geyser
+geyser_url: "grpc.ny.shyft.to:443"
+
+# API ключ для подключения к Shyft Geyser
+api_key: "b2b972c6-fff2-4b5c-aac9-375c6984b80e"
+
+# RPC URL для транзакций Solana
+rpc_url: "https://api.mainnet-beta.solana.com"
