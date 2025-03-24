@@ -1,0 +1,25 @@
+# config.yaml
+# RPC URL для подключения к Solana
+rpc_url: "https://api.devnet.solana.com"
+
+# Список транзакций перевода
+transfers:
+  # Пример 1: Перевод с первого кошелька на первый целевой адрес
+  - from_private_key: "BASE64_PRIVATE_KEY_1" # Приватный ключ в формате base64
+    to_address: "TARGET_WALLET_ADDRESS_1"    # Публичный адрес кошелька получателя
+    amount: 100000000                        # Сумма в лампортах (0.1 SOL)
+
+  # Пример 2: Перевод с второго кошелька на второй целевой адрес
+  - from_private_key: "BASE64_PRIVATE_KEY_2"
+    to_address: "TARGET_WALLET_ADDRESS_2"
+    amount: 50000000                         # 0.05 SOL
+
+  # Пример 3: Перевод с третьего кошелька на третий целевой адрес
+  - from_private_key: "BASE64_PRIVATE_KEY_3"
+    to_address: "TARGET_WALLET_ADDRESS_3"
+    amount: 25000000                         # 0.025 SOL
+
+  # Добавьте сколько угодно дополнительных транзакций в том же формате
+  # - from_private_key: "..."
+  #   to_address: "..."
+  #   amount: ...
