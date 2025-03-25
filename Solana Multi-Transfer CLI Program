@@ -1,0 +1,324 @@
+use clap::{App, Arg};
+use futures::future::join_all;
+use serde::{Deserialize, Serialize};
+use solana_client::rpc_client::RpcClient;
+use solana_sdk::{
+    commitment_config::CommitmentConfig,
+    pubkey::Pubkey,
+    signature::{read_keypair_file, Keypair, Signer},
+    system_instruction,
+    transaction::Transaction,
+};
+use std::{
+    fs::File,
+    io::Read,
+    str::FromStr,
+    time::{Duration, Instant},
+};
+use tokio::time::sleep;
+use yaml_rust::YamlLoader;
+
+#[derive(Debug, Serialize, Deserialize)]
+struct WalletConfig {
+    from_wallets: Vec<WalletInfo>,
+    to_wallets: Vec<WalletInfo>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct WalletInfo {
+    address: String,
+    keypair_path: Option<String>,
+}
+
+#[derive(Debug)]
+struct TransferResult {
+    from: String,
+    to: String,
+    signature: String,
+    success: bool,
+    processing_time: Duration,
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let matches = App::new("Solana Multi-Transfer CLI")
+        .version("1.0")
+        .author("Your Name")
+        .about("Simultaneously transfer SOL from multiple wallets to multiple destinations")
+        .arg(
+            Arg::with_name("config")
+                .short("c")
+                .long("config")
+                .value_name("FILE")
+                .help("Sets a custom config file (default: config.yaml)")
+                .takes_value(true)
+                .default_value("config.yaml"),
+        )
+        .arg(
+            Arg::with_name("amount")
+                .short("a")
+                .long("amount")
+                .value_name("AMOUNT")
+                .help("Amount of SOL to transfer")
+                .takes_value(true)
+                .required(true),
+        )
+        .arg(
+            Arg::with_name("network")
+                .short("n")
+                .long("network")
+                .value_name("NETWORK")
+                .help("Solana network to connect to (mainnet-beta, testnet, devnet)")
+                .takes_value(true)
+                .default_value("devnet"),
+        )
+        .get_matches();
+
+    let config_path = matches.value_of("config").unwrap();
+    let amount = matches
+        .value_of("amount")
+        .unwrap()
+        .parse::<f64>()?
+        * 1_000_000_000.0; // Convert SOL to lamports
+    let network = matches.value_of("network").unwrap();
+
+    // Read and parse config file
+    let mut file = File::open(config_path)?;
+    let mut content = String::new();
+    file.read_to_string(&mut content)?;
+    
+    let docs = YamlLoader::load_from_str(&content)?;
+    let doc = &docs[0];
+    
+    let mut wallet_config = WalletConfig {
+        from_wallets: Vec::new(),
+        to_wallets: Vec::new(),
+    };
+    
+    // Parse from_wallets from YAML
+    if let Some(from_wallets) = doc["from_wallets"].as_vec() {
+        for wallet in from_wallets {
+            wallet_config.from_wallets.push(WalletInfo {
+                address: wallet["address"].as_str().unwrap_or_default().to_string(),
+                keypair_path: wallet["keypair_path"].as_str().map(|s| s.to_string()),
+            });
+        }
+    }
+    
+    // Parse to_wallets from YAML
+    if let Some(to_wallets) = doc["to_wallets"].as_vec() {
+        for wallet in to_wallets {
+            wallet_config.to_wallets.push(WalletInfo {
+                address: wallet["address"].as_str().unwrap_or_default().to_string(),
+                keypair_path: None, // Destination wallets don't need keypairs
+            });
+        }
+    }
+    
+    // Setup RPC client
+    let url = match network {
+        "mainnet-beta" => "https://api.mainnet-beta.solana.com",
+        "testnet" => "https://api.testnet.solana.com",
+        "devnet" => "https://api.devnet.solana.com",
+        _ => "https://api.devnet.solana.com",
+    };
+    
+    let client = RpcClient::new_with_commitment(url.to_string(), CommitmentConfig::confirmed());
+    
+    // Execute transfers
+    let results = execute_transfers(&client, &wallet_config, amount as u64).await?;
+    
+    // Print results
+    println!("\nTransfer Results:");
+    println!("{:-<80}", "");
+    println!("{:<15} {:<15} {:<50} {:<8} {:<10}", 
+             "From (short)", "To (short)", "Signature", "Status", "Time (ms)");
+    println!("{:-<80}", "");
+    
+    let mut success_count = 0;
+    let mut total_time = Duration::from_secs(0);
+    
+    for result in &results {
+        let from_short = shorten_address(&result.from);
+        let to_short = shorten_address(&result.to);
+        let status = if result.success { "SUCCESS" } else { "FAILED" };
+        let time_ms = result.processing_time.as_millis();
+        
+        println!("{:<15} {:<15} {:<50} {:<8} {:<10}", 
+                 from_short, to_short, result.signature, status, time_ms);
+        
+        if result.success {
+            success_count += 1;
+        }
+        total_time += result.processing_time;
+    }
+    
+    println!("{:-<80}", "");
+    println!("Summary:");
+    println!("  Total transfers: {}", results.len());
+    println!("  Successful transfers: {}", success_count);
+    println!("  Failed transfers: {}", results.len() - success_count);
+    
+    if !results.is_empty() {
+        let avg_time = total_time.as_millis() / results.len() as u128;
+        println!("  Average processing time: {} ms", avg_time);
+    }
+    
+    Ok(())
+}
+
+async fn execute_transfers(
+    client: &RpcClient,
+    config: &WalletConfig,
+    amount: u64,
+) -> Result<Vec<TransferResult>, Box<dyn std::error::Error>> {
+    let mut transfer_tasks = Vec::new();
+    
+    for (i, from_wallet) in config.from_wallets.iter().enumerate() {
+        // Get the corresponding destination wallet or use the first one if no match
+        let to_wallet = if i < config.to_wallets.len() {
+            &config.to_wallets[i]
+        } else {
+            &config.to_wallets[0]
+        };
+        
+        let keypair_path = match &from_wallet.keypair_path {
+            Some(path) => path.clone(),
+            None => {
+                eprintln!("No keypair path provided for wallet: {}", from_wallet.address);
+                continue;
+            }
+        };
+        
+        let from_pubkey_str = from_wallet.address.clone();
+        let to_pubkey_str = to_wallet.address.clone();
+        let client = client.clone();
+        
+        transfer_tasks.push(tokio::spawn(async move {
+            let result = execute_single_transfer(
+                &client,
+                &keypair_path,
+                &from_pubkey_str,
+                &to_pubkey_str,
+                amount,
+            )
+            .await;
+            
+            match result {
+                Ok((signature, processing_time)) => TransferResult {
+                    from: from_pubkey_str,
+                    to: to_pubkey_str,
+                    signature,
+                    success: true,
+                    processing_time,
+                },
+                Err(e) => {
+                    eprintln!("Error transferring from {} to {}: {}", 
+                             from_pubkey_str, to_pubkey_str, e);
+                    TransferResult {
+                        from: from_pubkey_str,
+                        to: to_pubkey_str,
+                        signature: "FAILED".to_string(),
+                        success: false,
+                        processing_time: Duration::from_secs(0),
+                    }
+                }
+            }
+        }));
+    }
+    
+    let results = join_all(transfer_tasks).await;
+    
+    Ok(results
+        .into_iter()
+        .filter_map(|r| r.ok())
+        .collect())
+}
+
+async fn execute_single_transfer(
+    client: &RpcClient,
+    keypair_path: &str,
+    from_pubkey_str: &str,
+    to_pubkey_str: &str,
+    amount: u64,
+) -> Result<(String, Duration), Box<dyn std::error::Error>> {
+    let start_time = Instant::now();
+    
+    // Load keypair from file
+    let from_keypair = read_keypair_file(keypair_path)
+        .map_err(|e| format!("Failed to read keypair file: {}", e))?;
+    
+    // Parse public keys
+    let from_pubkey = Pubkey::from_str(from_pubkey_str)
+        .map_err(|e| format!("Invalid from address: {}", e))?;
+    let to_pubkey = Pubkey::from_str(to_pubkey_str)
+        .map_err(|e| format!("Invalid to address: {}", e))?;
+    
+    // Verify the loaded keypair matches the expected pubkey
+    if from_keypair.pubkey() != from_pubkey {
+        return Err(format!(
+            "Keypair public key ({}) doesn't match the specified from address ({})",
+            from_keypair.pubkey(), from_pubkey
+        )
+        .into());
+    }
+    
+    // Create transfer instruction
+    let instruction = system_instruction::transfer(&from_pubkey, &to_pubkey, amount);
+    
+    // Get recent blockhash
+    let recent_blockhash = client.get_latest_blockhash()?;
+    
+    // Create and sign transaction
+    let transaction = Transaction::new_signed_with_payer(
+        &[instruction],
+        Some(&from_pubkey),
+        &[&from_keypair],
+        recent_blockhash,
+    );
+    
+    // Send transaction
+    let signature = client.send_transaction(&transaction)?;
+    
+    // Wait for confirmation
+    let max_retries = 20;
+    let mut confirmed = false;
+    
+    for _ in 0..max_retries {
+        match client.get_signature_status(&signature) {
+            Ok(Some(status)) => {
+                if status.is_ok() {
+                    confirmed = true;
+                    break;
+                } else {
+                    return Err(format!("Transaction failed with status: {:?}", status).into());
+                }
+            }
+            Ok(None) => {
+                // Transaction not yet processed, wait and retry
+                sleep(Duration::from_millis(500)).await;
+            }
+            Err(e) => {
+                return Err(format!("Failed to get transaction status: {}", e).into());
+            }
+        }
+    }
+    
+    if !confirmed {
+        return Err("Transaction confirmation timed out".into());
+    }
+    
+    let processing_time = start_time.elapsed();
+    
+    Ok((signature.to_string(), processing_time))
+}
+
+fn shorten_address(address: &str) -> String {
+    if address.len() <= 10 {
+        return address.to_string();
+    }
+    
+    let start = &address[..5];
+    let end = &address[address.len() - 5..];
+    format!("{}...{}", start, end)
+}
